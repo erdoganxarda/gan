@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import platform
 from pathlib import Path
 
 import torch
@@ -33,7 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--max-len", type=int, default=160)
     parser.add_argument("--hidden-size", type=int, default=256)
     parser.add_argument("--layers", type=int, default=2)
@@ -92,6 +93,7 @@ def _run_epoch(
     optimizer: Adam | None = None,
     grad_clip: float = 1.0,
     max_batches: int = 0,
+    desc: str | None = None,
 ) -> tuple[float, float, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -102,8 +104,16 @@ def _run_epoch(
     steps = 0
 
     context = torch.enable_grad() if is_train else torch.no_grad()
+    total = None
+    if desc:
+        total = len(loader)
+        if max_batches > 0:
+            total = min(total, max_batches)
+        progress = tqdm(loader, total=total, desc=desc, leave=False)
+    else:
+        progress = loader
     with context:
-        for batch_idx, (seq, mask, _) in enumerate(loader):
+        for batch_idx, (seq, mask, _) in enumerate(progress):
             seq = seq.to(device)
             mask = mask.to(device)
 
@@ -129,6 +139,8 @@ def _run_epoch(
 
             if max_batches > 0 and (batch_idx + 1) >= max_batches:
                 break
+    if hasattr(progress, "close"):
+        progress.close()
 
     denom = max(steps, 1)
     return total_loss / denom, total_nll / denom, total_pen / denom
@@ -142,12 +154,17 @@ def main() -> None:
     out_dir = ensure_dir(args.out_dir)
     save_json(out_dir / "config.json", vars(args))
 
+    num_workers = args.num_workers
+    if num_workers > 0 and platform.system() == "Darwin":
+        print("[RNN] For macOS, setting num_workers=0 to avoid DataLoader worker hangs.")
+        num_workers = 0
+
     if args.synthetic_smoke:
         loaders = make_fake_stroke_loaders(
             batch_size=args.batch_size,
             max_len=args.max_len,
             seed=args.seed,
-            num_workers=args.num_workers,
+            num_workers=num_workers,
         )
     else:
         stroke_path = Path(args.strokes_path)
@@ -163,7 +180,7 @@ def main() -> None:
             cache_path=stroke_path,
             batch_size=args.batch_size,
             seed=args.seed,
-            num_workers=args.num_workers,
+            num_workers=num_workers,
         )
 
     model = RNNMDN(
@@ -185,6 +202,7 @@ def main() -> None:
             optimizer=optimizer,
             grad_clip=args.grad_clip,
             max_batches=args.max_train_batches,
+            desc=f"epoch {epoch} train",
         )
         val_loss, val_nll, val_pen = _run_epoch(
             model,
@@ -193,6 +211,7 @@ def main() -> None:
             optimizer=None,
             grad_clip=args.grad_clip,
             max_batches=args.max_val_batches,
+            desc=f"epoch {epoch} val",
         )
 
         row = {

@@ -67,7 +67,7 @@ python -m src.train_classifier \
 2. Train DCGAN:
 
 ```bash
-python -m src.train_dcgan \
+python3 -m src.train_dcgan \
   --data-dir data \
   --out-dir runs/dcgan \
   --epochs 40 \
@@ -79,7 +79,7 @@ python -m src.train_dcgan \
 3. Train sequence model (auto-builds stroke cache if missing):
 
 ```bash
-python -m src.train_rnn \
+python3 -m src.train_rnn \
   --strokes-path data/processed/emnist_letters_strokes_len160_seed42.npz \
   --data-dir data \
   --out-dir runs/rnn \
@@ -99,7 +99,7 @@ python -m src.sample \
   --num-samples 64 \
   --out reports/samples_dcgan.png
 
-python -m src.sample \
+python3 -m src.sample \
   --model rnn \
   --ckpt runs/rnn/best.pt \
   --num-samples 64 \
@@ -110,7 +110,7 @@ python -m src.sample \
 5. Evaluate comparison metrics:
 
 ```bash
-python -m src.eval \
+python3 -m src.eval \
   --dcgan-ckpt runs/dcgan/best.pt \
   --rnn-ckpt runs/rnn/best.pt \
   --classifier-ckpt runs/classifier/best.pt \

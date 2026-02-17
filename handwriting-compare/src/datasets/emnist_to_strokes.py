@@ -383,11 +383,33 @@ class StrokeSequenceDataset(Dataset):
     def __init__(self, cache_path: str | Path, split: str = "train") -> None:
         if split not in {"train", "val", "test"}:
             raise ValueError("split must be one of train/val/test")
-        self.payload = np.load(cache_path, mmap_mode="r")
-        self.sequences = self.payload["sequences"]
-        self.masks = self.payload["masks"]
-        self.labels = self.payload["labels"]
-        self.indices = self.payload[f"{split}_idx"]
+        self.cache_path = str(cache_path)
+        self.split = split
+        self._load()
+
+    def _load(self) -> None:
+        payload = np.load(self.cache_path)
+        self.sequences = payload["sequences"]
+        self.masks = payload["masks"]
+        self.labels = payload["labels"]
+        self.indices = payload[f"{self.split}_idx"]
+        try:
+            payload.close()
+        except Exception:
+            pass
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        # Avoid pickling large arrays / open file handles in multiprocessing workers.
+        state["sequences"] = None
+        state["masks"] = None
+        state["labels"] = None
+        state["indices"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._load()
 
     def __len__(self) -> int:
         return int(len(self.indices))

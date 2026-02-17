@@ -14,6 +14,10 @@ from torchvision.transforms import ToTensor
 SPLIT_NAMES = ("train", "val", "test")
 
 
+def _emnist_label_to_zero_index(label: int) -> int:
+    return int(label) - 1
+
+
 class EMNISTCombinedDataset(Dataset):
     """Combined EMNIST letters train+test with consistent 0-25 labels."""
 
@@ -27,7 +31,7 @@ class EMNISTCombinedDataset(Dataset):
             train=True,
             download=download,
             transform=transform,
-            target_transform=lambda y: int(y) - 1,
+            target_transform=_emnist_label_to_zero_index,
         )
         self.test_ds = EMNIST(
             root=self.root.as_posix(),
@@ -35,7 +39,7 @@ class EMNISTCombinedDataset(Dataset):
             train=False,
             download=download,
             transform=transform,
-            target_transform=lambda y: int(y) - 1,
+            target_transform=_emnist_label_to_zero_index,
         )
         self.train_len = len(self.train_ds)
 
