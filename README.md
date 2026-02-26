@@ -132,14 +132,16 @@ python3 -m src.eval \
 
 ## Metrics in `reports/metrics.json`
 
-- `gan_classifier_confidence_mean`
-- `gan_classifier_confidence_p80`
-- `gan_class_entropy`
-- `rnn_stroke_length_mean`
-- `rnn_pen_lifts_mean`
-- `rnn_smoothness_mean_abs_turn`
-- `rnn_render_classifier_confidence_mean`
-- `rnn_render_class_entropy`
+| Metric | DCGAN | RNN |
+|---|---|---|
+| Classifier confidence (mean) | 0.706 | 0.603 |
+| Classifier confidence (p80) | 0.952 | — |
+| Class entropy | 3.174 | 2.607 |
+| Mean pen lifts per sequence | — | 30.4 |
+| Mean stroke length | — | 8.76 |
+| Stroke smoothness (mean abs turn, rad) | — | 0.868 |
+
+Higher class entropy indicates more diverse class coverage. Higher classifier confidence indicates more letter-like samples.
 
 ## Reproducibility
 
@@ -159,6 +161,33 @@ pytest -q
 
 Smoke tests execute CLI scripts in synthetic mode for quick validation without EMNIST download.
 
+## Stroke Conversion Pipeline
+
+EMNIST bitmap images are converted to `(dx, dy, pen_lift)` stroke sequences for RNN training:
+
+1. **Binarize & skeletonize** — `skimage.morphology.skeletonize` thins ink to 1-pixel-wide paths.
+2. **Graph traversal** — build pixel adjacency graph, extract connected components, split at branch/endpoint nodes.
+3. **Greedy path ordering** — chain strokes by nearest-endpoint distance to approximate left-to-right draw order.
+4. **Delta encoding** — convert absolute `(x, y)` positions to `(dx, dy)`, clip to `[-1, 1]`, append a `pen_lift` flag at each stroke boundary.
+5. **Fixed-length padding** — pad/truncate to `max_len=160` steps; store in a compressed `.npz` cache.
+
+## Key Hyperparameters
+
+| | DCGAN | RNN-MDN |
+|---|---|---|
+| Latent / input dim | 100 | 3 |
+| Hidden units | — | 256 |
+| LSTM layers | — | 2 |
+| MDN mixtures | — | 20 |
+| Batch size | 128 | 128 |
+| Learning rate | 2e-4 | 1e-3 |
+| Epochs | 40 | 60 |
+| Optimizer | Adam (β₁=0.5) | Adam |
+| Gradient clip | — | 1.0 |
+| Dropout | 0.2 (D) | 0.2 |
+
 ## Limitations
 
-Stroke sequences are derived from image skeletons, so they approximate pen trajectories rather than true online handwriting capture.
+- Stroke sequences are derived from image skeletons and approximate pen trajectories rather than true online handwriting capture.
+- The DCGAN produces 28×28 images; upscaling will show pixelation.
+- Class conditioning is not implemented — both models generate unconditioned samples.
