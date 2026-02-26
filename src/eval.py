@@ -38,29 +38,44 @@ def _load_classifier(path: str | Path, device: torch.device) -> ClassifierCNN:
     return model
 
 
-def _load_dcgan(path: str | Path, device: torch.device) -> tuple[Generator, int]:
-    ckpt = torch.load(path, map_location=device)
-    latent_dim = int(ckpt.get("config", {}).get("latent_dim", 100))
-    model = Generator(latent_dim=latent_dim).to(device)
-    model.load_state_dict(ckpt["generator_state"])
-    model.eval()
-    return model, latent_dim
-
-
-def _load_rnn(path: str | Path, device: torch.device, max_len_default: int) -> tuple[RNNMDN, int]:
+def _load_dcgan(path: str | Path, device: torch.device) -> tuple[Generator, int, bool, int]:
     ckpt = torch.load(path, map_location=device)
     cfg = ckpt.get("config", {})
+    latent_dim = int(cfg.get("latent_dim", 100))
+    conditional = bool(cfg.get("conditional", False))
+    num_classes = int(cfg.get("num_classes", 26))
+    label_embed_dim = int(cfg.get("label_embed_dim", 32))
+    model = Generator(
+        latent_dim=latent_dim,
+        conditional=conditional,
+        num_classes=num_classes,
+        label_embed_dim=label_embed_dim,
+    ).to(device)
+    model.load_state_dict(ckpt["generator_state"])
+    model.eval()
+    return model, latent_dim, conditional, num_classes
+
+
+def _load_rnn(path: str | Path, device: torch.device, max_len_default: int) -> tuple[RNNMDN, int, bool, int]:
+    ckpt = torch.load(path, map_location=device)
+    cfg = ckpt.get("config", {})
+    conditional = bool(cfg.get("conditional", False))
+    num_classes = int(cfg.get("num_classes", 26))
+    class_embed_dim = int(cfg.get("class_embed_dim", 16))
     model = RNNMDN(
         input_dim=3,
         hidden_size=int(cfg.get("hidden_size", 256)),
         num_layers=int(cfg.get("layers", 2)),
         num_mixtures=int(cfg.get("mixtures", 20)),
         dropout=float(cfg.get("dropout", 0.2)),
+        conditional=conditional,
+        num_classes=num_classes,
+        class_embed_dim=class_embed_dim,
     ).to(device)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
     max_len = int(cfg.get("max_len", max_len_default))
-    return model, max_len
+    return model, max_len, conditional, num_classes
 
 
 def _class_entropy(pred_counts: np.ndarray) -> float:
@@ -105,8 +120,8 @@ def main() -> None:
     ensure_dir(out_path.parent)
 
     classifier = _load_classifier(args.classifier_ckpt, device)
-    dcgan, latent_dim = _load_dcgan(args.dcgan_ckpt, device)
-    rnn, rnn_max_len = _load_rnn(args.rnn_ckpt, device, args.max_len)
+    dcgan, latent_dim, dcgan_conditional, dcgan_num_classes = _load_dcgan(args.dcgan_ckpt, device)
+    rnn, rnn_max_len, rnn_conditional, rnn_num_classes = _load_rnn(args.rnn_ckpt, device, args.max_len)
 
     # GAN metrics.
     gan_conf: list[float] = []
@@ -117,7 +132,12 @@ def main() -> None:
         while remaining > 0:
             batch = min(args.batch_size, remaining)
             z = torch.randn((batch, latent_dim), device=device)
-            images = dcgan(z)
+            dcgan_labels = (
+                torch.randint(0, dcgan_num_classes, (batch,), device=device, dtype=torch.long)
+                if dcgan_conditional
+                else None
+            )
+            images = dcgan(z, labels=dcgan_labels)
             logits = classifier(images)
             probs = F.softmax(logits, dim=1)
             conf, pred = probs.max(dim=1)
@@ -146,6 +166,11 @@ def main() -> None:
                 max_len=rnn_max_len,
                 device=device,
                 temperature=args.temperature,
+                labels=(
+                    torch.randint(0, rnn_num_classes, (batch,), device=device, dtype=torch.long)
+                    if rnn_conditional
+                    else None
+                ),
             )
             seq_np = seq.detach().cpu().numpy()
 

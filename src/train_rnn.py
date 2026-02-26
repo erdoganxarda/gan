@@ -40,8 +40,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--layers", type=int, default=2)
     parser.add_argument("--mixtures", type=int, default=20)
     parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--conditional", action="store_true")
+    parser.add_argument("--num-classes", type=int, default=26)
+    parser.add_argument("--class-embed-dim", type=int, default=16)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--sample-interval", type=int, default=5)
+    parser.add_argument("--rebuild-strokes-cache", action="store_true")
     parser.add_argument("--synthetic-smoke", action="store_true")
     parser.add_argument("--max-train-batches", type=int, default=0)
     parser.add_argument("--max-val-batches", type=int, default=0)
@@ -94,6 +98,7 @@ def _run_epoch(
     grad_clip: float = 1.0,
     max_batches: int = 0,
     desc: str | None = None,
+    conditional: bool = False,
 ) -> tuple[float, float, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -113,15 +118,17 @@ def _run_epoch(
     else:
         progress = loader
     with context:
-        for batch_idx, (seq, mask, _) in enumerate(progress):
+        for batch_idx, (seq, mask, labels) in enumerate(progress):
             seq = seq.to(device)
             mask = mask.to(device)
+            labels = labels.to(device, dtype=torch.long)
 
             input_seq = seq[:, :-1, :]
             target_seq = seq[:, 1:, :]
             target_mask = mask[:, 1:]
 
-            params, _ = model(input_seq)
+            cond_labels = labels if conditional else None
+            params, _ = model(input_seq, labels=cond_labels)
             nll = mdn_nll(params, target_seq[..., :2], target_mask)
             pen_loss = pen_bce_loss(params["pen_logit"], target_seq[..., 2], target_mask)
             loss = nll + pen_loss
@@ -168,14 +175,14 @@ def main() -> None:
         )
     else:
         stroke_path = Path(args.strokes_path)
-        if not stroke_path.exists():
-            build_or_load_stroke_cache(
-                data_dir=args.data_dir,
-                out_path=stroke_path,
-                max_len=args.max_len,
-                seed=args.seed,
-                download=True,
-            )
+        build_or_load_stroke_cache(
+            data_dir=args.data_dir,
+            out_path=stroke_path,
+            max_len=args.max_len,
+            seed=args.seed,
+            download=True,
+            force_rebuild=args.rebuild_strokes_cache,
+        )
         loaders = make_stroke_dataloaders(
             cache_path=stroke_path,
             batch_size=args.batch_size,
@@ -189,6 +196,9 @@ def main() -> None:
         num_layers=args.layers,
         num_mixtures=args.mixtures,
         dropout=args.dropout,
+        conditional=args.conditional,
+        num_classes=args.num_classes,
+        class_embed_dim=args.class_embed_dim,
     ).to(device)
     optimizer = Adam(model.parameters(), lr=args.lr)
 
@@ -203,6 +213,7 @@ def main() -> None:
             grad_clip=args.grad_clip,
             max_batches=args.max_train_batches,
             desc=f"epoch {epoch} train",
+            conditional=args.conditional,
         )
         val_loss, val_nll, val_pen = _run_epoch(
             model,
@@ -212,6 +223,7 @@ def main() -> None:
             grad_clip=args.grad_clip,
             max_batches=args.max_val_batches,
             desc=f"epoch {epoch} val",
+            conditional=args.conditional,
         )
 
         row = {
@@ -240,11 +252,15 @@ def main() -> None:
 
         if epoch % args.sample_interval == 0 or epoch == 1 or epoch == args.epochs:
             model.eval()
+            sample_labels = None
+            if args.conditional:
+                sample_labels = torch.arange(64, device=device, dtype=torch.long) % args.num_classes
             samples = generate_unconditional(
                 model=model,
                 num_samples=64,
                 max_len=args.max_len,
                 device=device,
+                labels=sample_labels,
             ).cpu()
             render = render_sequences_to_tensor(samples.numpy())
             save_tensor_grid(render, out_dir / f"samples_epoch{epoch:03d}.png", nrow=8)

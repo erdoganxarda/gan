@@ -13,6 +13,7 @@ from tqdm.auto import tqdm
 from src.datasets.emnist import EMNISTCombinedDataset, SplitIndices, get_or_create_splits
 
 Coord = Tuple[int, int]
+STROKE_CACHE_VERSION = 2
 
 
 @dataclass
@@ -40,7 +41,7 @@ def _build_adjacency(skel: np.ndarray) -> Dict[Coord, List[Coord]]:
     pixels = {tuple(x) for x in coords.tolist()}
     adjacency: Dict[Coord, List[Coord]] = {p: [] for p in pixels}
 
-    for r, c in pixels:
+    for r, c in sorted(pixels):
         for nr, nc in _neighbors8(r, c):
             if (nr, nc) in pixels:
                 adjacency[(r, c)].append((nr, nc))
@@ -51,7 +52,7 @@ def _connected_components(adjacency: Dict[Coord, List[Coord]]) -> List[List[Coor
     comps: List[List[Coord]] = []
     seen: set[Coord] = set()
 
-    for node in adjacency:
+    for node in sorted(adjacency):
         if node in seen:
             continue
         stack = [node]
@@ -60,7 +61,7 @@ def _connected_components(adjacency: Dict[Coord, List[Coord]]) -> List[List[Coor
         while stack:
             cur = stack.pop()
             comp.append(cur)
-            for nxt in adjacency[cur]:
+            for nxt in sorted(adjacency[cur]):
                 if nxt not in seen:
                     seen.add(nxt)
                     stack.append(nxt)
@@ -93,7 +94,7 @@ def _walk_path(
         if cur in critical and cur != start:
             break
 
-        candidates = [v for v in adjacency[cur] if v != prev]
+        candidates = [v for v in sorted(adjacency[cur]) if v != prev]
         unvisited = [v for v in candidates if _edge_key(cur, v) not in visited_edges]
         if not unvisited:
             break
@@ -115,7 +116,7 @@ def _extract_component_paths(component: Sequence[Coord], adjacency: Dict[Coord, 
     visited_edges: set[Tuple[Coord, Coord]] = set()
 
     for node in sorted(critical):
-        for nb in adjacency[node]:
+        for nb in sorted(adjacency[node]):
             key = _edge_key(node, nb)
             if key in visited_edges:
                 continue
@@ -123,8 +124,8 @@ def _extract_component_paths(component: Sequence[Coord], adjacency: Dict[Coord, 
             paths.append(path)
 
     # Capture leftover cycle edges that may be disconnected from selected critical traversals.
-    for node in component:
-        for nb in adjacency[node]:
+    for node in sorted(component):
+        for nb in sorted(adjacency[node]):
             key = _edge_key(node, nb)
             if key in visited_edges:
                 continue
@@ -156,6 +157,14 @@ def _left_top_endpoint(paths: List[np.ndarray]) -> Tuple[int, bool]:
     return best_idx, best_flip
 
 
+def _path_transition_cost(current_end: np.ndarray, next_start: np.ndarray) -> float:
+    jump = float(np.linalg.norm(current_end - next_start))
+    backward_dx = max(0.0, float(current_end[0] - next_start[0]))
+    backward_penalty = 4.0 * backward_dx
+    teleport_penalty = max(0.0, jump - 0.20) * 2.0
+    return jump + backward_penalty + teleport_penalty
+
+
 def _order_paths(paths: List[np.ndarray]) -> List[np.ndarray]:
     if not paths:
         return []
@@ -172,20 +181,19 @@ def _order_paths(paths: List[np.ndarray]) -> List[np.ndarray]:
     while remaining:
         best_idx = -1
         best_flip = False
-        best_dist = float("inf")
+        best_cost = float("inf")
 
-        for i in remaining:
+        for i in sorted(remaining):
             p = paths[i]
-            d_start = float(np.linalg.norm(current_end - p[0]))
-            d_end = float(np.linalg.norm(current_end - p[-1]))
-            if d_start < best_dist:
-                best_dist = d_start
-                best_idx = i
-                best_flip = False
-            if d_end < best_dist:
-                best_dist = d_end
-                best_idx = i
-                best_flip = True
+            for flip in (False, True):
+                start = p[-1] if flip else p[0]
+                cost = _path_transition_cost(current_end, start)
+                tiebreak = (cost, i, int(flip))
+                best_tiebreak = (best_cost, best_idx if best_idx >= 0 else int(1e9), int(best_flip))
+                if tiebreak < best_tiebreak:
+                    best_cost = cost
+                    best_idx = i
+                    best_flip = flip
 
         nxt = paths[best_idx][::-1] if best_flip else paths[best_idx]
         ordered.append(nxt)
@@ -307,6 +315,7 @@ def convert_images_to_stroke_cache(
         val_idx=val_idx,
         test_idx=test_idx,
         max_len=np.array([max_len], dtype=np.int64),
+        cache_version=np.array([STROKE_CACHE_VERSION], dtype=np.int64),
     )
 
     return StrokeCache(
@@ -319,15 +328,29 @@ def convert_images_to_stroke_cache(
     )
 
 
+def stroke_cache_is_compatible(path: str | Path, max_len: int) -> bool:
+    payload = np.load(path)
+    try:
+        version = int(payload.get("cache_version", np.array([0], dtype=np.int64))[0])
+        cached_max_len = int(payload.get("max_len", np.array([-1], dtype=np.int64))[0])
+    finally:
+        try:
+            payload.close()
+        except Exception:
+            pass
+    return version == STROKE_CACHE_VERSION and cached_max_len == int(max_len)
+
+
 def build_or_load_stroke_cache(
     data_dir: str | Path,
     out_path: str | Path,
     max_len: int = 160,
     seed: int = 42,
     download: bool = True,
+    force_rebuild: bool = False,
 ) -> StrokeCache:
     out_path = Path(out_path)
-    if out_path.exists():
+    if out_path.exists() and not force_rebuild and stroke_cache_is_compatible(out_path, max_len=max_len):
         return load_stroke_cache(out_path)
 
     split_indices: SplitIndices = get_or_create_splits(data_dir=data_dir, seed=seed, download=download)
@@ -356,6 +379,7 @@ def build_or_load_stroke_cache(
         val_idx=split_indices.val,
         test_idx=split_indices.test,
         max_len=np.array([max_len], dtype=np.int64),
+        cache_version=np.array([STROKE_CACHE_VERSION], dtype=np.int64),
     )
     return StrokeCache(
         sequences=sequences,

@@ -22,6 +22,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--latent-dim", type=int, default=100)
+    parser.add_argument("--conditional", action="store_true")
+    parser.add_argument("--num-classes", type=int, default=26)
+    parser.add_argument("--label-embed-dim", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--beta1", type=float, default=0.5)
     parser.add_argument("--beta2", type=float, default=0.999)
@@ -52,8 +55,18 @@ def main() -> None:
             download=True,
         )
 
-    generator = Generator(latent_dim=args.latent_dim).to(device)
-    discriminator = Discriminator(dropout=0.2).to(device)
+    generator = Generator(
+        latent_dim=args.latent_dim,
+        conditional=args.conditional,
+        num_classes=args.num_classes,
+        label_embed_dim=args.label_embed_dim,
+    ).to(device)
+    discriminator = Discriminator(
+        dropout=0.2,
+        conditional=args.conditional,
+        num_classes=args.num_classes,
+        label_embed_dim=args.label_embed_dim,
+    ).to(device)
     generator.apply(weights_init)
     discriminator.apply(weights_init)
 
@@ -62,6 +75,7 @@ def main() -> None:
     criterion = nn.BCELoss()
 
     fixed_z = torch.randn(64, args.latent_dim, device=device)
+    fixed_labels = torch.arange(64, device=device, dtype=torch.long) % args.num_classes if args.conditional else None
     best_g_loss = float("inf")
 
     for epoch in range(1, args.epochs + 1):
@@ -73,8 +87,9 @@ def main() -> None:
         steps = 0
 
         progress = tqdm(loaders["train"], desc=f"DCGAN epoch {epoch}")
-        for batch_idx, (real_images, _) in enumerate(progress):
+        for batch_idx, (real_images, real_labels) in enumerate(progress):
             real_images = real_images.to(device)
+            real_labels = real_labels.to(device=device, dtype=torch.long)
             batch_size = real_images.size(0)
 
             valid = torch.ones((batch_size, 1), device=device)
@@ -83,16 +98,22 @@ def main() -> None:
             # Train discriminator.
             opt_d.zero_grad(set_to_none=True)
             z = torch.randn((batch_size, args.latent_dim), device=device)
-            fake_images = generator(z)
-            real_loss = criterion(discriminator(real_images), valid)
-            fake_loss = criterion(discriminator(fake_images.detach()), fake)
+            fake_labels = (
+                torch.randint(0, args.num_classes, (batch_size,), device=device, dtype=torch.long)
+                if args.conditional
+                else None
+            )
+            real_images_labels = real_labels if args.conditional else None
+            fake_images = generator(z, labels=fake_labels)
+            real_loss = criterion(discriminator(real_images, labels=real_images_labels), valid)
+            fake_loss = criterion(discriminator(fake_images.detach(), labels=fake_labels), fake)
             d_loss = 0.5 * (real_loss + fake_loss)
             d_loss.backward()
             opt_d.step()
 
             # Train generator.
             opt_g.zero_grad(set_to_none=True)
-            g_loss = criterion(discriminator(fake_images), valid)
+            g_loss = criterion(discriminator(fake_images, labels=fake_labels), valid)
             g_loss.backward()
             opt_g.step()
 
@@ -134,7 +155,7 @@ def main() -> None:
         if epoch % args.sample_interval == 0 or epoch == 1 or epoch == args.epochs:
             generator.eval()
             with torch.no_grad():
-                sample_images = generator(fixed_z)
+                sample_images = generator(fixed_z, labels=fixed_labels)
             save_tensor_grid(sample_images, out_dir / f"samples_epoch{epoch:03d}.png", nrow=8)
 
 

@@ -16,14 +16,23 @@ class RNNMDN(nn.Module):
         num_layers: int = 2,
         num_mixtures: int = 20,
         dropout: float = 0.2,
+        conditional: bool = False,
+        num_classes: int = 26,
+        class_embed_dim: int = 16,
     ) -> None:
         super().__init__()
+        self.input_dim = input_dim
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.num_mixtures = num_mixtures
+        self.conditional = conditional
+        self.num_classes = num_classes
+        self.class_embed_dim = class_embed_dim
+        self.class_embed = nn.Embedding(num_classes, class_embed_dim) if conditional else None
+        rnn_input_dim = input_dim + (class_embed_dim if conditional else 0)
 
         self.rnn = nn.LSTM(
-            input_size=input_dim,
+            input_size=rnn_input_dim,
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -35,8 +44,20 @@ class RNNMDN(nn.Module):
         self,
         x: torch.Tensor,
         hidden: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        labels: torch.Tensor | None = None,
     ) -> tuple[Dict[str, torch.Tensor], Tuple[torch.Tensor, torch.Tensor]]:
-        rnn_out, hidden = self.rnn(x, hidden)
+        rnn_input = x
+        if self.conditional:
+            if labels is None:
+                raise ValueError("labels must be provided when conditional=True")
+            labels = labels.to(device=x.device, dtype=torch.long).view(-1)
+            if labels.shape[0] != x.shape[0]:
+                raise ValueError("labels batch size must match sequence batch size")
+            assert self.class_embed is not None
+            class_cond = self.class_embed(labels).unsqueeze(1).expand(-1, x.shape[1], -1)
+            rnn_input = torch.cat([x, class_cond], dim=-1)
+
+        rnn_out, hidden = self.rnn(rnn_input, hidden)
         raw = self.head(rnn_out)
 
         k = self.num_mixtures
@@ -140,14 +161,20 @@ def generate_unconditional(
     max_len: int,
     device: torch.device,
     temperature: float = 1.0,
+    labels: torch.Tensor | None = None,
 ) -> torch.Tensor:
     model.eval()
     hidden = None
     current = torch.zeros((num_samples, 1, 3), device=device)
     seq = torch.zeros((num_samples, max_len, 3), device=device)
+    cond_labels = None
+    if labels is not None:
+        cond_labels = labels.to(device=device, dtype=torch.long).view(-1)
+        if cond_labels.shape[0] != num_samples:
+            raise ValueError("labels batch size must match num_samples")
 
     for t in range(max_len):
-        params, hidden = model(current, hidden)
+        params, hidden = model(current, hidden, labels=cond_labels)
         step = sample_mdn_step(params, temperature=temperature)
         seq[:, t, :] = step
         current = step.unsqueeze(1)
